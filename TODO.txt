@@ -1,5 +1,10 @@
-add subclass/superclass information (currently conformances have that?)
-how about module names?
-how about properties?
-how about number of AST tokens and complexity metrics?
-how about generics?
+- how about properties?
+
+- how about number of AST tokens and complexity metrics?
+
+- how about generics?
+
+- handle scoped imports e.g. `import struct Foundation.URL`
+
+- separate superclass from protocol conformances for classes. SwiftSyntax cannot distinguish between them without type resolution so
+both end up in conformances. SourceKit would be needed for accuracy.

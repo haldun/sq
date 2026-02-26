@@ -221,6 +221,41 @@ final class IndexVisitor: SyntaxVisitor {
         handleFunctionDecl(node, name: "init", kind: .`init`)
     }
 
+    override func visit(_ node: DeinitializerDeclSyntax) -> SyntaxVisitorContinueKind {
+        functions.append(
+            .init(
+                name: "deinit",
+                file: fileName,
+                line: line(for: node),
+                kind: .deinit,
+                qualifiedParentType: currentQualifiedType,
+                visibility: node.modifiers.visibility,
+                isAsync: false,
+                isStatic: false,
+                isThrows: false
+            )
+        )
+        return .visitChildren
+    }
+
+    override func visit(_ node: SubscriptDeclSyntax) -> SyntaxVisitorContinueKind {
+        // We cannot use `handleFunctionDecl` for subscripts, so special case here.
+        functions.append(
+            .init(
+                name: "subscript",
+                file: fileName,
+                line: line(for: node),
+                kind: .subscript,
+                qualifiedParentType: currentQualifiedType,
+                visibility: node.modifiers.visibility,
+                isAsync: false,
+                isStatic: node.modifiers.isStatic,
+                isThrows: false
+            )
+        )
+        return .visitChildren
+    }
+
     private func handleFunctionDecl(
         _ node: some FunctionDeclSyntaxProtocol,
         name: String,
