@@ -16,14 +16,20 @@ struct SQ: AsyncParsableCommand {
     var databasePath: String = "./sq.db"
 
     mutating func run() async throws {
+        let start = CACurrentMediaTime()
+        defer {
+            print(
+                String(
+                    format: "Done in %.2fms. Open with: duckdb \(databasePath)", (CACurrentMediaTime() - start) * 1000.0
+                )
+            )
+        }
         let folderURL = URL(fileURLWithPath: folder)
         let index = try await makeCodeIndex(folder: folderURL)
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(index)
         try data.write(to: URL(fileURLWithPath: snapshotPath))
         try loadIntoDuckDB(snapshotPath: snapshotPath, databasePath: databasePath)
-        print("Done. Open with: duckdb \(databasePath)")
     }
 }
 

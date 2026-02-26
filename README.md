@@ -29,15 +29,15 @@ duckdb sq.db
 
 ```
 -- Types with the most methods
-SELECT parentType, COUNT(*) as count
+SELECT qualifiedParentType, COUNT(*) as count
 FROM functions
 WHERE kind = 'method'
-GROUP BY parentType
+GROUP BY qualifiedParentType
 ORDER BY 2 DESC
 LIMIT 10;
 
 -- All public throwing functions
-SELECT name, parentType, file
+SELECT name, qualifiedParentType, file
 FROM functions
 WHERE visibility = 'public' AND isThrows = true;
 
@@ -51,7 +51,7 @@ LIMIT 10;
 -- All free functions (not methods)
 SELECT name, file, line
 FROM functions
-WHERE parentType IS NULL;
+WHERE qualifiedParentType IS NULL AND isFromExtension = false;
 
 -- Breakdown by type kind
 SELECT kind, COUNT(*) as count
@@ -90,7 +90,7 @@ WHERE t.name IS NULL AND f.qualifiedParentType IS NOT NULL;
 -- Globals
 SELECT name, kind, typeAnnotation, file, line
 FROM properties
-WHERE qualifiedParentType IS NULL;
+WHERE qualifiedParentType IS NULL AND isFromExtension = false;
 
 -- Most common type annotations
 SELECT typeAnnotation, COUNT(*) as count
