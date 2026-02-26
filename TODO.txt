@@ -1,5 +1,3 @@
-- how about properties?
-
 - how about number of AST tokens and complexity metrics?
 
 - how about generics?

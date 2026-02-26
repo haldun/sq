@@ -162,10 +162,7 @@ func makeCodeIndex(folder: URL) async throws -> CodeIndex {
         )
     else { return index }
 
-    let swiftFiles =
-        enumerator
-        .compactMap { $0 as? URL }
-        .filter { $0.pathExtension == "swift" }
+    let swiftFiles = enumerator.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
 
     return try await withThrowingTaskGroup(of: CodeIndex.self) { group in
         for fileURL in swiftFiles {
