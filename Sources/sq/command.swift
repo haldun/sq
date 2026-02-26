@@ -31,30 +31,36 @@ let duckDBBinaryPath = "/opt/homebrew/bin/duckdb"
 
 func loadIntoDuckDB(snapshotPath: String, databasePath: String) throws {
     let maximumObjectSize = 10_000_000
+    // @todo generate this SQL statement from Codable structs at runtime to avoid manually keeping SQL in sync with Swift model.
     let sql = """
         DROP TABLE IF EXISTS functions;
-        DROP TABLE IF EXISTS imports;
-        DROP TABLE IF EXISTS properties;
-        DROP TABLE IF EXISTS types;
-
         CREATE TABLE functions AS
-        SELECT f.name, f.file, f.line, f.kind, f.qualifiedParentType, f.visibility, f.isAsync, f.isStatic, f.isThrows FROM (
-            SELECT unnest(functions) as f FROM read_json_auto('\(snapshotPath)', maximum_object_size = \(maximumObjectSize))
+        SELECT f.name, f.file, f.line, f.kind, f.qualifiedParentType, f.visibility, f.isAsync, f.isStatic, f.isThrows, f.isFromExtension FROM (
+            SELECT unnest(functions) as f FROM read_json_auto('\(snapshotPath)')
         );
 
+        DROP TABLE IF EXISTS imports;
         CREATE TABLE imports AS
         SELECT f.module, f.file FROM (
             SELECT unnest(imports) as f FROM read_json_auto('\(snapshotPath)', maximum_object_size = \(maximumObjectSize))
         );
 
+        DROP TABLE IF EXISTS properties;
         CREATE TABLE properties AS
-        SELECT f.name, f.file, f.line, f.kind, f.qualifiedParentType, f.visibility, f.isStatic, f.isComputed, f.typeAnnotation FROM (
-            SELECT unnest(properties) as f FROM read_json_auto('\(snapshotPath)', maximum_object_size = \(maximumObjectSize))
+        SELECT f.name, f.file, f.line, f.kind, f.qualifiedParentType, f.visibility, f.isStatic, f.isComputed, f.typeAnnotation, f.isFromExtension FROM (
+            SELECT unnest(properties) as f FROM read_json_auto('\(snapshotPath)')
         );
 
+        DROP TABLE IF EXISTS types;
         CREATE TABLE types AS
         SELECT f.name, f.qualifiedName, f.file, f.line, f.kind, f.visibility, f.conformances FROM (
             SELECT unnest(types) as f FROM read_json_auto('\(snapshotPath)', maximum_object_size = \(maximumObjectSize))
+        );
+
+        DROP TABLE IF EXISTS extensions;
+        CREATE TABLE extensions AS
+        SELECT f.extendedType, f.file, f.line, f.conformances FROM (
+            SELECT unnest(extensions) as f FROM read_json_auto('\(snapshotPath)')
         );
         """
 
@@ -76,6 +82,7 @@ func loadIntoDuckDB(snapshotPath: String, databasePath: String) throws {
 }
 
 struct CodeIndex: Codable {
+    var extensions: [ExtensionInfo] = []
     var functions: [FunctionInfo] = []
     var imports: [ImportInfo] = []
     var properties: [PropertyInfo] = []
@@ -108,6 +115,7 @@ struct FunctionInfo: Codable {
     let isAsync: Bool
     let isStatic: Bool
     let isThrows: Bool
+    let isFromExtension: Bool
 }
 
 struct ImportInfo: Codable {
@@ -130,6 +138,7 @@ struct PropertyInfo: Codable {
     let isStatic: Bool
     let isComputed: Bool
     let typeAnnotation: String?  // e.g. "String", "Int?" what's written in source
+    let isFromExtension: Bool
 }
 
 enum TypeKind: String, Codable {
@@ -147,6 +156,13 @@ struct TypeInfo: Codable {
     let line: Int
     let kind: TypeKind
     let visibility: Visibility
+    let conformances: [String]
+}
+
+struct ExtensionInfo: Codable {
+    let extendedType: String  // whatever is written in source, preserving dots since we don't do type resolution
+    let file: String
+    let line: Int
     let conformances: [String]
 }
 
@@ -172,6 +188,7 @@ func makeCodeIndex(folder: URL) async throws -> CodeIndex {
                 let visitor = IndexVisitor(fileName: fileURL.path, tree: tree)
                 visitor.walk(tree)
                 return CodeIndex(
+                    extensions: visitor.extensions,
                     functions: visitor.functions,
                     imports: visitor.imports,
                     properties: visitor.properties,
@@ -180,6 +197,7 @@ func makeCodeIndex(folder: URL) async throws -> CodeIndex {
             }
         }
         for try await partial in group {
+            index.extensions.append(contentsOf: partial.extensions)
             index.functions.append(contentsOf: partial.functions)
             index.imports.append(contentsOf: partial.imports)
             index.properties.append(contentsOf: partial.properties)
@@ -213,17 +231,32 @@ extension InitializerDeclSyntax: FunctionDeclSyntaxProtocol {}
 final class IndexVisitor: SyntaxVisitor {
     let fileName: String
     let locationConverter: SourceLocationConverter
-
     var functions: [FunctionInfo] = []
     var imports: [ImportInfo] = []
     var properties: [PropertyInfo] = []
     var types: [TypeInfo] = []
+    var extensions: [ExtensionInfo] = []
 
-    private var typeStack: [String] = []
-    private var currentQualifiedType: String? { typeStack.isEmpty ? nil : typeStack.joined(separator: ".") }
+    private enum Scope {
+        case type(String)
+        case `extension`
+    }
+
+    private var scopeStack: [Scope] = []
+    private var currentQualifiedType: String? {
+        let names = scopeStack.compactMap { scope in
+            if case .type(let name) = scope { return name }
+            return nil
+        }
+        return names.isEmpty ? nil : names.joined(separator: ".")
+    }
     private var functionDepth = 0
     private func enterFunction() { functionDepth += 1 }
     private func exitFunction() { functionDepth -= 1 }
+    private var isInExtension: Bool {
+        if case .extension = scopeStack.last { return true }
+        return false
+    }
 
     init(fileName: String, tree: SourceFileSyntax) {
         self.fileName = fileName
@@ -234,7 +267,7 @@ final class IndexVisitor: SyntaxVisitor {
     // Handle functions
     override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
         enterFunction()
-        return handleFunctionDecl(node, name: node.name.text, kind: typeStack.isEmpty ? .function : .method)
+        return handleFunctionDecl(node, name: node.name.text, kind: currentQualifiedType == nil ? .function : .method)
     }
     override func visitPost(_ node: FunctionDeclSyntax) { exitFunction() }
 
@@ -256,7 +289,8 @@ final class IndexVisitor: SyntaxVisitor {
                 visibility: node.modifiers.visibility,
                 isAsync: false,
                 isStatic: false,
-                isThrows: false
+                isThrows: false,
+                isFromExtension: false
             )
         )
         return .visitChildren
@@ -276,7 +310,8 @@ final class IndexVisitor: SyntaxVisitor {
                 visibility: node.modifiers.visibility,
                 isAsync: false,
                 isStatic: node.modifiers.isStatic,
-                isThrows: false
+                isThrows: false,
+                isFromExtension: isInExtension
             )
         )
         return .visitChildren
@@ -298,7 +333,8 @@ final class IndexVisitor: SyntaxVisitor {
                 visibility: node.modifiers.visibility,
                 isAsync: node.signature.effectSpecifiers?.asyncSpecifier != nil,
                 isStatic: node.modifiers.isStatic,
-                isThrows: node.signature.effectSpecifiers?.throwsClause != nil
+                isThrows: node.signature.effectSpecifiers?.throwsClause != nil,
+                isFromExtension: isInExtension
             )
         )
         return .visitChildren
@@ -312,12 +348,6 @@ final class IndexVisitor: SyntaxVisitor {
     }
 
     // Handle types
-    override func visit(_ node: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
-        typeStack.append(node.extendedType.trimmedDescription)
-        return .visitChildren
-    }
-    override func visitPost(_ node: ExtensionDeclSyntax) { typeStack.removeLast() }
-
     override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind { handle(node: node, kind: .struct) }
     override func visitPost(_ node: StructDeclSyntax) { handleTypeDeclPost() }
 
@@ -334,10 +364,10 @@ final class IndexVisitor: SyntaxVisitor {
     override func visitPost(_ node: ProtocolDeclSyntax) { handleTypeDeclPost() }
 
     private func handle(node: TypeDeclSyntax, kind: TypeKind) -> SyntaxVisitorContinueKind {
-        typeStack.append(node.name.text)
+        scopeStack.append(.type(node.name.text))
         let type = TypeInfo(
             name: node.name.text,
-            qualifiedName: typeStack.joined(separator: "."),
+            qualifiedName: currentQualifiedType!,  // we just added this one to the stack, so ! is fine here.
             file: fileName,
             line: line(for: node),
             kind: kind,
@@ -348,7 +378,7 @@ final class IndexVisitor: SyntaxVisitor {
         return .visitChildren
     }
 
-    private func handleTypeDeclPost() { typeStack.removeLast() }
+    private func handleTypeDeclPost() { scopeStack.removeLast() }
 
     private func line(for node: some SyntaxProtocol) -> Int {
         locationConverter.location(for: node.positionAfterSkippingLeadingTrivia).line
@@ -367,9 +397,30 @@ final class IndexVisitor: SyntaxVisitor {
                     name: name, kind: kind, file: fileName, line: line(for: node),
                     qualifiedParentType: currentQualifiedType, visibility: node.modifiers.visibility,
                     isStatic: node.modifiers.isStatic, isComputed: binding.accessorBlock != nil,
-                    typeAnnotation: binding.typeAnnotation?.type.trimmedDescription))
+                    typeAnnotation: binding.typeAnnotation?.type.trimmedDescription,
+                    isFromExtension: isInExtension
+                )
+            )
         }
         return .visitChildren
+    }
+
+    // Handle extensions
+
+    override func visit(_ node: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
+        scopeStack.append(.extension)
+        extensions.append(
+            .init(
+                extendedType: node.extendedType.trimmedDescription,
+                file: fileName,
+                line: line(for: node),
+                conformances: node.inheritanceClause?.conformances ?? []
+            )
+        )
+        return .visitChildren
+    }
+    override func visitPost(_ node: ExtensionDeclSyntax) {
+        scopeStack.removeLast()
     }
 }
 
