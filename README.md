@@ -130,4 +130,36 @@ FROM properties
 WHERE qualifiedParentType IS NOT NULL
 GROUP BY qualifiedParentType
 HAVING COUNT(*) = SUM(CASE WHEN isComputed THEN 1 ELSE 0 END);
+
+-- Types that are extended in multiple files (fragmented across codebase)
+SELECT extendedType, COUNT(DISTINCT file) as file_count
+FROM extensions
+GROUP BY extendedType
+ORDER BY 2 DESC
+LIMIT 10;
+
+-- Extensions that add protocol conformances
+SELECT extendedType, conformances, file
+FROM extensions
+WHERE len(conformances) > 0;
+
+-- All methods added via extensions
+SELECT name, qualifiedParentType, file, line
+FROM functions
+WHERE isFromExtension = true AND kind = 'method'
+ORDER BY qualifiedParentType;
+
+-- Types that only have their methods defined in extensions (no methods in main declaration)
+SELECT DISTINCT f.qualifiedParentType
+FROM functions f
+WHERE f.isFromExtension = true
+AND f.qualifiedParentType NOT IN (
+    SELECT qualifiedParentType FROM functions
+    WHERE isFromExtension = false AND kind = 'method'
+);
+
+-- Files that are purely extensions (no type declarations)
+SELECT DISTINCT e.file
+FROM extensions e
+WHERE e.file NOT IN (SELECT DISTINCT file FROM types);
 ```
