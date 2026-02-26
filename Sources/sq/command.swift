@@ -33,22 +33,28 @@ func loadIntoDuckDB(snapshotPath: String, databasePath: String) throws {
     let maximumObjectSize = 10_000_000
     let sql = """
         DROP TABLE IF EXISTS functions;
-        DROP TABLE IF EXISTS types;
         DROP TABLE IF EXISTS imports;
+        DROP TABLE IF EXISTS properties;
+        DROP TABLE IF EXISTS types;
 
         CREATE TABLE functions AS
         SELECT f.name, f.file, f.line, f.kind, f.qualifiedParentType, f.visibility, f.isAsync, f.isStatic, f.isThrows FROM (
             SELECT unnest(functions) as f FROM read_json_auto('\(snapshotPath)', maximum_object_size = \(maximumObjectSize))
         );
 
-        CREATE TABLE types AS
-        SELECT f.name, f.qualifiedName, f.file, f.line, f.kind, f.visibility, f.conformances FROM (
-            SELECT unnest(types) as f FROM read_json_auto('\(snapshotPath)', maximum_object_size = \(maximumObjectSize))
-        );
-
         CREATE TABLE imports AS
         SELECT f.module, f.file FROM (
             SELECT unnest(imports) as f FROM read_json_auto('\(snapshotPath)', maximum_object_size = \(maximumObjectSize))
+        );
+
+        CREATE TABLE properties AS
+        SELECT f.name, f.file, f.line, f.kind, f.qualifiedParentType, f.visibility, f.isStatic, f.isComputed, f.typeAnnotation FROM (
+            SELECT unnest(properties) as f FROM read_json_auto('\(snapshotPath)', maximum_object_size = \(maximumObjectSize))
+        );
+
+        CREATE TABLE types AS
+        SELECT f.name, f.qualifiedName, f.file, f.line, f.kind, f.visibility, f.conformances FROM (
+            SELECT unnest(types) as f FROM read_json_auto('\(snapshotPath)', maximum_object_size = \(maximumObjectSize))
         );
         """
 
@@ -70,9 +76,10 @@ func loadIntoDuckDB(snapshotPath: String, databasePath: String) throws {
 }
 
 struct CodeIndex: Codable {
-    var functions: [FunctionInfo]
-    var imports: [ImportInfo]
-    var types: [TypeInfo]
+    var functions: [FunctionInfo] = []
+    var imports: [ImportInfo] = []
+    var properties: [PropertyInfo] = []
+    var types: [TypeInfo] = []
 }
 
 enum FunctionKind: String, Codable {
@@ -108,6 +115,23 @@ struct ImportInfo: Codable {
     let file: String
 }
 
+enum PropertyKind: String, Codable {
+    case `let`
+    case `var`
+}
+
+struct PropertyInfo: Codable {
+    let name: String
+    let kind: PropertyKind
+    let file: String
+    let line: Int
+    let qualifiedParentType: String?
+    let visibility: Visibility
+    let isStatic: Bool
+    let isComputed: Bool
+    let typeAnnotation: String?  // e.g. "String", "Int?" what's written in source
+}
+
 enum TypeKind: String, Codable {
     case `actor`
     case `class`
@@ -127,7 +151,7 @@ struct TypeInfo: Codable {
 }
 
 func makeCodeIndex(folder: URL) async throws -> CodeIndex {
-    var index = CodeIndex(functions: [], imports: [], types: [])
+    var index = CodeIndex()
     let fileManager = FileManager.default
 
     guard
@@ -153,6 +177,7 @@ func makeCodeIndex(folder: URL) async throws -> CodeIndex {
                 return CodeIndex(
                     functions: visitor.functions,
                     imports: visitor.imports,
+                    properties: visitor.properties,
                     types: visitor.types
                 )
             }
@@ -160,6 +185,7 @@ func makeCodeIndex(folder: URL) async throws -> CodeIndex {
         for try await partial in group {
             index.functions.append(contentsOf: partial.functions)
             index.imports.append(contentsOf: partial.imports)
+            index.properties.append(contentsOf: partial.properties)
             index.types.append(contentsOf: partial.types)
         }
         return index
@@ -193,10 +219,14 @@ final class IndexVisitor: SyntaxVisitor {
 
     var functions: [FunctionInfo] = []
     var imports: [ImportInfo] = []
+    var properties: [PropertyInfo] = []
     var types: [TypeInfo] = []
 
     private var typeStack: [String] = []
     private var currentQualifiedType: String? { typeStack.isEmpty ? nil : typeStack.joined(separator: ".") }
+    private var functionDepth = 0
+    private func enterFunction() { functionDepth += 1 }
+    private func exitFunction() { functionDepth -= 1 }
 
     init(fileName: String, tree: SourceFileSyntax) {
         self.fileName = fileName
@@ -204,24 +234,21 @@ final class IndexVisitor: SyntaxVisitor {
         super.init(viewMode: .sourceAccurate)
     }
 
-    // Handle imports
-    override func visit(_ node: ImportDeclSyntax) -> SyntaxVisitorContinueKind {
-        let module = node.path.map { $0.name.text }.joined(separator: ".")
-        imports.append(.init(module: module, file: fileName))
-        return .visitChildren
-    }
-
     // Handle functions
     override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
-        handleFunctionDecl(
-            node, name: node.name.text, kind: typeStack.isEmpty ? .function : .method)
+        enterFunction()
+        return handleFunctionDecl(node, name: node.name.text, kind: typeStack.isEmpty ? .function : .method)
     }
+    override func visitPost(_ node: FunctionDeclSyntax) { exitFunction() }
 
     override func visit(_ node: InitializerDeclSyntax) -> SyntaxVisitorContinueKind {
-        handleFunctionDecl(node, name: "init", kind: .`init`)
+        enterFunction()
+        return handleFunctionDecl(node, name: "init", kind: .`init`)
     }
+    override func visitPost(_ node: InitializerDeclSyntax) { exitFunction() }
 
     override func visit(_ node: DeinitializerDeclSyntax) -> SyntaxVisitorContinueKind {
+        enterFunction()
         functions.append(
             .init(
                 name: "deinit",
@@ -237,8 +264,10 @@ final class IndexVisitor: SyntaxVisitor {
         )
         return .visitChildren
     }
+    override func visitPost(_ node: DeinitializerDeclSyntax) { exitFunction() }
 
     override func visit(_ node: SubscriptDeclSyntax) -> SyntaxVisitorContinueKind {
+        enterFunction()
         // We cannot use `handleFunctionDecl` for subscripts, so special case here.
         functions.append(
             .init(
@@ -255,6 +284,7 @@ final class IndexVisitor: SyntaxVisitor {
         )
         return .visitChildren
     }
+    override func visitPost(_ node: SubscriptDeclSyntax) { exitFunction() }
 
     private func handleFunctionDecl(
         _ node: some FunctionDeclSyntaxProtocol,
@@ -277,6 +307,13 @@ final class IndexVisitor: SyntaxVisitor {
         return .visitChildren
     }
 
+    // Handle imports
+    override func visit(_ node: ImportDeclSyntax) -> SyntaxVisitorContinueKind {
+        let module = node.path.map { $0.name.text }.joined(separator: ".")
+        imports.append(.init(module: module, file: fileName))
+        return .visitChildren
+    }
+
     // Handle types
     override func visit(_ node: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
         typeStack.append(node.extendedType.trimmedDescription)
@@ -284,29 +321,19 @@ final class IndexVisitor: SyntaxVisitor {
     }
     override func visitPost(_ node: ExtensionDeclSyntax) { typeStack.removeLast() }
 
-    override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
-        handle(node: node, kind: .struct)
-    }
+    override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind { handle(node: node, kind: .struct) }
     override func visitPost(_ node: StructDeclSyntax) { handleTypeDeclPost() }
 
-    override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
-        handle(node: node, kind: .class)
-    }
+    override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind { handle(node: node, kind: .class) }
     override func visitPost(_ node: ClassDeclSyntax) { handleTypeDeclPost() }
 
-    override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind {
-        handle(node: node, kind: .enum)
-    }
+    override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind { handle(node: node, kind: .enum) }
     override func visitPost(_ node: EnumDeclSyntax) { handleTypeDeclPost() }
 
-    override func visit(_ node: ActorDeclSyntax) -> SyntaxVisitorContinueKind {
-        handle(node: node, kind: .actor)
-    }
+    override func visit(_ node: ActorDeclSyntax) -> SyntaxVisitorContinueKind { handle(node: node, kind: .actor) }
     override func visitPost(_ node: ActorDeclSyntax) { handleTypeDeclPost() }
 
-    override func visit(_ node: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind {
-        handle(node: node, kind: .protocol)
-    }
+    override func visit(_ node: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind { handle(node: node, kind: .protocol) }
     override func visitPost(_ node: ProtocolDeclSyntax) { handleTypeDeclPost() }
 
     private func handle(node: TypeDeclSyntax, kind: TypeKind) -> SyntaxVisitorContinueKind {
@@ -328,6 +355,24 @@ final class IndexVisitor: SyntaxVisitor {
 
     private func line(for node: some SyntaxProtocol) -> Int {
         locationConverter.location(for: node.positionAfterSkippingLeadingTrivia).line
+    }
+
+    // Handle properties
+    override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
+        // Skip variables defined in the functions.
+        guard functionDepth == 0 else { return .skipChildren }
+        let kind: PropertyKind = node.bindingSpecifier.tokenKind == .keyword(.let) ? .let : .var
+        for binding in node.bindings {
+            // For now we just skip complex patterns like `let (x, y) =` and only handle simple cases
+            guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
+            properties.append(
+                .init(
+                    name: name, kind: kind, file: fileName, line: line(for: node),
+                    qualifiedParentType: currentQualifiedType, visibility: node.modifiers.visibility,
+                    isStatic: node.modifiers.isStatic, isComputed: binding.accessorBlock != nil,
+                    typeAnnotation: binding.typeAnnotation?.type.trimmedDescription))
+        }
+        return .visitChildren
     }
 }
 

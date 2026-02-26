@@ -14,6 +14,17 @@ Then open the database and query:
 duckdb sq.db
 ```
 
+## Limitations
+
+- For classes the superclass and protocol conformances are both stored in `conformances` field.
+- No support for scoped imports (e.g. `import struct Foundation.URL`)
+- No call graph
+- Generic parameter clauses and constraints (e.g. `Foo<T: Codable>`) are not indexed.
+- No type resolution, sq works purely at the syntax level via SwiftSyntax.
+- Local variables inside function bodies are excluded. Only type-level and file-level declarations are indexed.
+- Qualified names like `Foo.Bar.Baz` are supported, but the parent type of a method defined in an extension may not match the qualified name of the original type if defined in a different file.
+- Complex patterns like `let (x, y) =` are skipped
+
 ## Examples
 
 ```
@@ -75,4 +86,48 @@ SELECT f.name, f.qualifiedParentType, f.file
 FROM functions f
 LEFT JOIN types t ON t.qualifiedName = f.qualifiedParentType AND t.file = f.file
 WHERE t.name IS NULL AND f.qualifiedParentType IS NOT NULL;
+
+-- Globals
+SELECT name, kind, typeAnnotation, file, line
+FROM properties
+WHERE qualifiedParentType IS NULL;
+
+-- Most common type annotations
+SELECT typeAnnotation, COUNT(*) as count
+FROM properties
+WHERE typeAnnotation IS NOT NULL
+GROUP BY typeAnnotation
+ORDER BY 2 DESC
+LIMIT 10;
+
+-- All computed properties
+SELECT name, qualifiedParentType, typeAnnotation
+FROM properties
+WHERE isComputed = true;
+
+-- Types with the most properties
+SELECT qualifiedParentType, COUNT(*) as count
+FROM properties
+WHERE qualifiedParentType IS NOT NULL
+GROUP BY qualifiedParentType
+ORDER BY 2 DESC
+LIMIT 10;
+
+-- All static properties
+SELECT name, qualifiedParentType, typeAnnotation
+FROM properties
+WHERE isStatic = true;
+
+-- Public vars
+SELECT name, qualifiedParentType, typeAnnotation, isComputed
+FROM properties
+WHERE visibility = 'public' AND kind = 'var'
+ORDER BY qualifiedParentType;
+
+-- Types that have no stored properties (only computed)
+SELECT qualifiedParentType
+FROM properties
+WHERE qualifiedParentType IS NOT NULL
+GROUP BY qualifiedParentType
+HAVING COUNT(*) = SUM(CASE WHEN isComputed THEN 1 ELSE 0 END);
 ```
