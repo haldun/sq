@@ -44,7 +44,7 @@ func loadIntoDuckDB(snapshotPath: String, databasePath: String) throws {
         DROP TABLE IF EXISTS functions;
         CREATE TABLE functions AS
         SELECT f.name, f.file, f.line, f.kind, f.qualifiedParentType, f.visibility, f.isAsync, f.isStatic, f.isThrows,
-               f.isFromExtension, f.nodeCount
+               f.isFromExtension, f.isProtocolRequirement, f.nodeCount
         FROM (
             SELECT unnest(functions) as f FROM read_json_auto('\(snapshotPath)')
         );
@@ -126,6 +126,7 @@ struct FunctionInfo: Codable {
     let isStatic: Bool
     let isThrows: Bool
     let isFromExtension: Bool
+    let isProtocolRequirement: Bool
     let nodeCount: Int
 }
 
@@ -228,14 +229,14 @@ final class IndexVisitor: SyntaxVisitor {
     var extensions: [ExtensionInfo] = []
 
     private enum Scope {
-        case type(String)
+        case type(String, TypeKind)
         case `extension`
     }
 
     private var scopeStack: [Scope] = []
     private var currentQualifiedType: String? {
         let names = scopeStack.compactMap { scope in
-            if case .type(let name) = scope { return name }
+            if case .type(let name, _) = scope { return name }
             return nil
         }
         return names.isEmpty ? nil : names.joined(separator: ".")
@@ -245,6 +246,10 @@ final class IndexVisitor: SyntaxVisitor {
     private func exitFunction() { functionDepth -= 1 }
     private var isInExtension: Bool {
         if case .extension = scopeStack.last { return true }
+        return false
+    }
+    private var isInProtocol: Bool {
+        if case .type(_, .protocol) = scopeStack.last { return true }
         return false
     }
 
@@ -281,6 +286,7 @@ final class IndexVisitor: SyntaxVisitor {
                 isStatic: false,
                 isThrows: false,
                 isFromExtension: false,
+                isProtocolRequirement: false,
                 nodeCount: node.totalNodeCount
             )
         )
@@ -303,6 +309,7 @@ final class IndexVisitor: SyntaxVisitor {
                 isStatic: node.modifiers.isStatic,
                 isThrows: false,
                 isFromExtension: isInExtension,
+                isProtocolRequirement: isInProtocol,
                 nodeCount: node.totalNodeCount
             )
         )
@@ -327,6 +334,7 @@ final class IndexVisitor: SyntaxVisitor {
                 isStatic: node.modifiers.isStatic,
                 isThrows: node.signature.effectSpecifiers?.throwsClause != nil,
                 isFromExtension: isInExtension,
+                isProtocolRequirement: isInProtocol,
                 nodeCount: node.totalNodeCount
             )
         )
@@ -357,7 +365,7 @@ final class IndexVisitor: SyntaxVisitor {
     override func visitPost(_ node: ProtocolDeclSyntax) { handleTypeDeclPost() }
 
     private func handle(node: TypeDeclSyntax, kind: TypeKind) -> SyntaxVisitorContinueKind {
-        scopeStack.append(.type(node.name.text))
+        scopeStack.append(.type(node.name.text, kind))
         let type = TypeInfo(
             name: node.name.text,
             qualifiedName: currentQualifiedType!,  // we just added this one to the stack, so ! is fine here.

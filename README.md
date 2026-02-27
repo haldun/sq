@@ -162,4 +162,16 @@ AND f.qualifiedParentType NOT IN (
 SELECT DISTINCT e.file
 FROM extensions e
 WHERE e.file NOT IN (SELECT DISTINCT file FROM types);
+
+-- All protocol requirements across the codebase
+SELECT name, qualifiedParentType FROM functions
+WHERE isProtocolRequirement = true
+ORDER BY qualifiedParentType;
+
+-- Protocols with the most requirements
+SELECT qualifiedParentType, COUNT(*) as count
+FROM functions
+WHERE isProtocolRequirement = true
+GROUP BY qualifiedParentType
+ORDER BY 2 DESC;
 ```
