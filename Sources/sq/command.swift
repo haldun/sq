@@ -37,11 +37,15 @@ let duckDBBinaryPath = "/opt/homebrew/bin/duckdb"
 
 func loadIntoDuckDB(snapshotPath: String, databasePath: String) throws {
     let maximumObjectSize = 10_000_000
-    // @todo generate this SQL statement from Codable structs at runtime to avoid manually keeping SQL in sync with Swift model.
+    // @todo generate this SQL from the Codable structs to avoid manually keeping it in sync with the Swift model.
+    // Tried macros and protocols but neither is really worth it. Macros are heavy and require a separate target, and the protocol
+    // approach just moves the problem rather than fixing it.
     let sql = """
         DROP TABLE IF EXISTS functions;
         CREATE TABLE functions AS
-        SELECT f.name, f.file, f.line, f.kind, f.qualifiedParentType, f.visibility, f.isAsync, f.isStatic, f.isThrows, f.isFromExtension FROM (
+        SELECT f.name, f.file, f.line, f.kind, f.qualifiedParentType, f.visibility, f.isAsync, f.isStatic, f.isThrows,
+               f.isFromExtension, f.nodeCount
+        FROM (
             SELECT unnest(functions) as f FROM read_json_auto('\(snapshotPath)')
         );
 
@@ -122,6 +126,7 @@ struct FunctionInfo: Codable {
     let isStatic: Bool
     let isThrows: Bool
     let isFromExtension: Bool
+    let nodeCount: Int
 }
 
 struct ImportInfo: Codable {
@@ -213,27 +218,6 @@ func makeCodeIndex(folder: URL) async throws -> CodeIndex {
     }
 }
 
-// These protocols shorten the visitor code
-protocol TypeDeclSyntax: DeclSyntaxProtocol {
-    var name: TokenSyntax { get }
-    var modifiers: DeclModifierListSyntax { get }
-    var inheritanceClause: InheritanceClauseSyntax? { get }
-}
-
-extension StructDeclSyntax: TypeDeclSyntax {}
-extension ClassDeclSyntax: TypeDeclSyntax {}
-extension EnumDeclSyntax: TypeDeclSyntax {}
-extension ActorDeclSyntax: TypeDeclSyntax {}
-extension ProtocolDeclSyntax: TypeDeclSyntax {}
-
-protocol FunctionDeclSyntaxProtocol: DeclSyntaxProtocol {
-    var modifiers: DeclModifierListSyntax { get }
-    var signature: FunctionSignatureSyntax { get }
-}
-
-extension FunctionDeclSyntax: FunctionDeclSyntaxProtocol {}
-extension InitializerDeclSyntax: FunctionDeclSyntaxProtocol {}
-
 final class IndexVisitor: SyntaxVisitor {
     let fileName: String
     let locationConverter: SourceLocationConverter
@@ -296,7 +280,8 @@ final class IndexVisitor: SyntaxVisitor {
                 isAsync: false,
                 isStatic: false,
                 isThrows: false,
-                isFromExtension: false
+                isFromExtension: false,
+                nodeCount: node.totalNodeCount
             )
         )
         return .visitChildren
@@ -317,7 +302,8 @@ final class IndexVisitor: SyntaxVisitor {
                 isAsync: false,
                 isStatic: node.modifiers.isStatic,
                 isThrows: false,
-                isFromExtension: isInExtension
+                isFromExtension: isInExtension,
+                nodeCount: node.totalNodeCount
             )
         )
         return .visitChildren
@@ -340,7 +326,8 @@ final class IndexVisitor: SyntaxVisitor {
                 isAsync: node.signature.effectSpecifiers?.asyncSpecifier != nil,
                 isStatic: node.modifiers.isStatic,
                 isThrows: node.signature.effectSpecifiers?.throwsClause != nil,
-                isFromExtension: isInExtension
+                isFromExtension: isInExtension,
+                nodeCount: node.totalNodeCount
             )
         )
         return .visitChildren
@@ -430,7 +417,27 @@ final class IndexVisitor: SyntaxVisitor {
     }
 }
 
-// helpers
+// These protocols shorten the visitor code
+protocol TypeDeclSyntax: DeclSyntaxProtocol {
+    var name: TokenSyntax { get }
+    var modifiers: DeclModifierListSyntax { get }
+    var inheritanceClause: InheritanceClauseSyntax? { get }
+}
+
+extension StructDeclSyntax: TypeDeclSyntax {}
+extension ClassDeclSyntax: TypeDeclSyntax {}
+extension EnumDeclSyntax: TypeDeclSyntax {}
+extension ActorDeclSyntax: TypeDeclSyntax {}
+extension ProtocolDeclSyntax: TypeDeclSyntax {}
+
+protocol FunctionDeclSyntaxProtocol: DeclSyntaxProtocol {
+    var modifiers: DeclModifierListSyntax { get }
+    var signature: FunctionSignatureSyntax { get }
+}
+
+extension FunctionDeclSyntax: FunctionDeclSyntaxProtocol {}
+extension InitializerDeclSyntax: FunctionDeclSyntaxProtocol {}
+
 extension DeclModifierListSyntax {
     var visibility: Visibility {
         for modifier in self {
@@ -457,5 +464,11 @@ extension DeclModifierListSyntax {
 extension InheritanceClauseSyntax {
     var conformances: [String] {
         inheritedTypes.map { $0.type.trimmedDescription }
+    }
+}
+
+extension SyntaxProtocol {
+    var totalNodeCount: Int {
+        tokens(viewMode: .sourceAccurate).reduce(0) { acc, _ in acc + 1 }
     }
 }
