@@ -63,7 +63,7 @@ func loadIntoDuckDB(snapshotPath: String, databasePath: String) throws {
 
         DROP TABLE IF EXISTS types;
         CREATE TABLE types AS
-        SELECT f.name, f.qualifiedName, f.file, f.line, f.kind, f.visibility, f.conformances, f.isObjC FROM (
+        SELECT f.name, f.qualifiedName, f.file, f.line, f.kind, f.visibility, f.conformances, f.isObjC, f.caseCount FROM (
             SELECT unnest(types) as f FROM read_json_auto('\(snapshotPath)', maximum_object_size = \(maximumObjectSize))
         );
 
@@ -171,6 +171,7 @@ struct TypeInfo: Codable {
     let visibility: Visibility
     let conformances: [String]
     let isObjC: Bool
+    let caseCount: Int? // Only make sense for `enum`s
 }
 
 struct ExtensionInfo: Codable {
@@ -379,7 +380,8 @@ final class IndexVisitor: SyntaxVisitor {
             kind: kind,
             visibility: node.modifiers.visibility,
             conformances: node.inheritanceClause?.conformances ?? [],
-            isObjC: node.attributes.isObjC
+            isObjC: node.attributes.isObjC,
+            caseCount: node.caseCount
         )
         types.append(type)
         return .visitChildren
@@ -444,6 +446,16 @@ extension ClassDeclSyntax: TypeDeclSyntax {}
 extension EnumDeclSyntax: TypeDeclSyntax {}
 extension ActorDeclSyntax: TypeDeclSyntax {}
 extension ProtocolDeclSyntax: TypeDeclSyntax {}
+
+extension TypeDeclSyntax {
+    var caseCount: Int? {
+        guard let enumDecl = self as? EnumDeclSyntax else { return nil }
+        return enumDecl.memberBlock
+            .members
+            .compactMap { $0.decl.as(EnumCaseDeclSyntax.self) }
+            .flatMap { $0.elements }.count
+    }
+}
 
 protocol FunctionDeclSyntaxProtocol: DeclSyntaxProtocol {
     var attributes: AttributeListSyntax { get }
