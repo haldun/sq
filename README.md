@@ -174,4 +174,23 @@ FROM functions
 WHERE isProtocolRequirement = true
 GROUP BY qualifiedParentType
 ORDER BY 2 DESC;
+
+-- All @objc methods (legacy surface area)
+SELECT name, qualifiedParentType, file, line
+FROM functions
+WHERE isObjC = true AND kind = 'method'
+ORDER BY qualifiedParentType;
+
+-- Types that are fully @objc exposed
+SELECT name, qualifiedName, kind
+FROM types
+WHERE isObjC = true;
+
+-- Files with the most @objc declarations (legacy hotspots)
+SELECT file, COUNT(*) as count
+FROM functions
+WHERE isObjC = true
+GROUP BY file
+ORDER BY 2 DESC
+LIMIT 10;
 ```

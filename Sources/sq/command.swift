@@ -44,7 +44,7 @@ func loadIntoDuckDB(snapshotPath: String, databasePath: String) throws {
         DROP TABLE IF EXISTS functions;
         CREATE TABLE functions AS
         SELECT f.name, f.file, f.line, f.kind, f.qualifiedParentType, f.visibility, f.isAsync, f.isStatic, f.isThrows,
-               f.isFromExtension, f.isProtocolRequirement, f.nodeCount
+               f.isFromExtension, f.isProtocolRequirement, f.isObjC, f.nodeCount
         FROM (
             SELECT unnest(functions) as f FROM read_json_auto('\(snapshotPath)')
         );
@@ -63,7 +63,7 @@ func loadIntoDuckDB(snapshotPath: String, databasePath: String) throws {
 
         DROP TABLE IF EXISTS types;
         CREATE TABLE types AS
-        SELECT f.name, f.qualifiedName, f.file, f.line, f.kind, f.visibility, f.conformances FROM (
+        SELECT f.name, f.qualifiedName, f.file, f.line, f.kind, f.visibility, f.conformances, f.isObjC FROM (
             SELECT unnest(types) as f FROM read_json_auto('\(snapshotPath)', maximum_object_size = \(maximumObjectSize))
         );
 
@@ -127,6 +127,7 @@ struct FunctionInfo: Codable {
     let isThrows: Bool
     let isFromExtension: Bool
     let isProtocolRequirement: Bool
+    let isObjC: Bool
     let nodeCount: Int
 }
 
@@ -169,6 +170,7 @@ struct TypeInfo: Codable {
     let kind: TypeKind
     let visibility: Visibility
     let conformances: [String]
+    let isObjC: Bool
 }
 
 struct ExtensionInfo: Codable {
@@ -287,6 +289,7 @@ final class IndexVisitor: SyntaxVisitor {
                 isThrows: false,
                 isFromExtension: false,
                 isProtocolRequirement: false,
+                isObjC: node.attributes.isObjC,
                 nodeCount: node.totalNodeCount
             )
         )
@@ -310,6 +313,7 @@ final class IndexVisitor: SyntaxVisitor {
                 isThrows: false,
                 isFromExtension: isInExtension,
                 isProtocolRequirement: isInProtocol,
+                isObjC: node.attributes.isObjC,
                 nodeCount: node.totalNodeCount
             )
         )
@@ -335,6 +339,7 @@ final class IndexVisitor: SyntaxVisitor {
                 isThrows: node.signature.effectSpecifiers?.throwsClause != nil,
                 isFromExtension: isInExtension,
                 isProtocolRequirement: isInProtocol,
+                isObjC: node.attributes.isObjC,
                 nodeCount: node.totalNodeCount
             )
         )
@@ -373,7 +378,8 @@ final class IndexVisitor: SyntaxVisitor {
             line: line(for: node),
             kind: kind,
             visibility: node.modifiers.visibility,
-            conformances: node.inheritanceClause?.conformances ?? []
+            conformances: node.inheritanceClause?.conformances ?? [],
+            isObjC: node.attributes.isObjC
         )
         types.append(type)
         return .visitChildren
@@ -427,9 +433,10 @@ final class IndexVisitor: SyntaxVisitor {
 
 // These protocols shorten the visitor code
 protocol TypeDeclSyntax: DeclSyntaxProtocol {
-    var name: TokenSyntax { get }
-    var modifiers: DeclModifierListSyntax { get }
+    var attributes: AttributeListSyntax { get }
     var inheritanceClause: InheritanceClauseSyntax? { get }
+    var modifiers: DeclModifierListSyntax { get }
+    var name: TokenSyntax { get }
 }
 
 extension StructDeclSyntax: TypeDeclSyntax {}
@@ -439,6 +446,7 @@ extension ActorDeclSyntax: TypeDeclSyntax {}
 extension ProtocolDeclSyntax: TypeDeclSyntax {}
 
 protocol FunctionDeclSyntaxProtocol: DeclSyntaxProtocol {
+    var attributes: AttributeListSyntax { get }
     var modifiers: DeclModifierListSyntax { get }
     var signature: FunctionSignatureSyntax { get }
 }
@@ -463,8 +471,7 @@ extension DeclModifierListSyntax {
 
     var isStatic: Bool {
         contains { modifier in
-            modifier.name.tokenKind == .keyword(.static)
-                || modifier.name.tokenKind == .keyword(.class)
+            modifier.name.tokenKind == .keyword(.static) || modifier.name.tokenKind == .keyword(.class)
         }
     }
 }
@@ -478,5 +485,13 @@ extension InheritanceClauseSyntax {
 extension SyntaxProtocol {
     var totalNodeCount: Int {
         tokens(viewMode: .sourceAccurate).reduce(0) { acc, _ in acc + 1 }
+    }
+}
+
+extension AttributeListSyntax {
+    var isObjC: Bool {
+        contains { element in
+            element.as(AttributeSyntax.self)?.attributeName.trimmedDescription == "objc"
+        }
     }
 }
